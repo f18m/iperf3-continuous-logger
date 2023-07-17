@@ -2,4 +2,5 @@
 
 #screen -d -m 
 
-iperf3 --server --json --logfile server_log.json --forceflush | iperf3tocsv_v2.py measurements.csv
+pkill iperf3
+nohup iperf3 --server --json --forceflush | iperf3tocsv_v3.py --output-csv iperf3_server_$(hostname).csv &
