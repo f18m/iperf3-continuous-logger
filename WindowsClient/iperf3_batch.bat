@@ -4,6 +4,7 @@
 
 SET DESTFOLDER=%USERPROFILE%\Iperf3ContinuousLogging
 SET MEAS_INTERVAL_SEC=60
+SET IPERF3_SERVER_ADDRESS=172.20.52.153
 
 
 @echo off
@@ -39,13 +40,13 @@ echo.
 echo JSON output will be saved in %DESTFOLDER%\%LOGFILE%_upload.json
 echo Now testing UPLOAD speed
 cd %DESTFOLDER%
-iperf3.exe --format m --client 172.20.52.153 --parallel 1 --json > %DESTFOLDER%\%LOGFILE%_upload.json
+iperf3.exe --format m --client %IPERF3_SERVER_ADDRESS% --parallel 1 --json > %DESTFOLDER%\%LOGFILE%_upload.json
 echo Done
 
 echo.
 echo JSON output will be saved in %DESTFOLDER%\%LOGFILE%_download.json
 echo Now testing DOWNLOAD speed
-iperf3.exe --format m --client 172.20.52.153 --parallel 1 --json --reverse >> %DESTFOLDER%\%LOGFILE%_download.json
+iperf3.exe --format m --client %IPERF3_SERVER_ADDRESS% --parallel 1 --json --reverse >> %DESTFOLDER%\%LOGFILE%_download.json
 echo Done
 
 echo.
