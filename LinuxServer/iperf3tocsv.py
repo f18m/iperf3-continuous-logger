@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 
 """
     Version: 1.1
@@ -9,128 +9,186 @@
     Python Version: 2.7
 
 
+    Modified by https://github.com/kbrohman-inrig/iPerf3toCSV
+
+    
     Modified by Francesco Montorsi, as part of https://github.com/f18m/iperf3-continuous-logger 
 
     NOTE: this script is designed to take input from stdin and produce CSV in output to a specific file
-
 """
 
-from __future__ import print_function
 import json
 import sys
 import csv
+import os
+import argparse
+import datetime
 
-db = {}
-csv_columns = ["date", "ip", "localport", "remoteport", "duration", "protocol", "num_streams", "cookie", "sent", "sent_mbps", "rcvd", "rcvd_mbps", "totalsent", "totalreceived"]
+stats = {
+    "JsonParseFailures": 0,
+    "NumMeasurements": 0,
+    "MeasurementsWithErrors": 0,
+    "CsvLinesWritten": 0,
+}
 
-def eprint(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
+csv_header = [
+    "#timestampTestStart",
+    "epochTestStart",
+    "IP",
+    "LocalPort",
+    "RemotePort",
+    "Duration(sec)",
+    "BytesReceived",
+    "BytesSent",
+    "BandwidthRx(Bps)",
+    "BandwidthTx(Bps)",
+]
 
-def main():
-    global db
-    """main program"""
 
-    
-    with open('myfile.csv','wb') as myfile:
-        wrtr = csv.writer(myfile, delimiter=',', quotechar='"')
+def eprint(str):
+    # all errors go to stderr to avoid corrupting the CSV output (eventually) produced on stdout
+    print(str, file=sys.stderr)
 
-    csv.register_dialect('iperf3log', delimiter=',', quoting=csv.QUOTE_MINIMAL)
-    csvwriter = csv.writer(sys.stdout, 'iperf3log')
 
-    if len(sys.argv) == 2:
-        if (sys.argv[1] != "-h"):
-            sys.exit("unknown option")
-        else:
-            csvwriter.writerow(csv_columns)
-            sys.exit(0)
+def parse_cmdline():
+    parser = argparse.ArgumentParser(description="Iperf3 JSON parser")
 
-    # accummulate volume per ip in a dict
-    db = {}
-    
+    # Optional arguments
+    parser.add_argument(
+        "--output-csv",
+        type=str,
+        help="The name of the output CSV file; if empty (default) then the CSV is written to stdout",
+        default="",
+    )
+
+    return parser.parse_args()
+
+
+def main(output_csv_file):
+    global stats
+
     # highly specific json parser
-    # assumes top { } pair are in single line
-
+    # assumes top { } pair are in single line -- this is what iperf3 3.5 produces at least
     jsonstr = ""
     i = 0
-    m = False
+    measIdx = 0
+    foundStart = False
     for line in sys.stdin:
         i += 1
         if line == "{\n":
             jsonstr = "{"
-            #print("found open line %d",i)
-            m = True
+            foundStart = True
         elif line == "}\n":
             jsonstr += "}"
-            #print("found close line %d",i)
-            if m:
-                process(jsonstr,csvwriter)
-            m = False
+            if foundStart:
+                # the full JSON of an iperf3 measurement has been collected... process it
+                process(jsonstr, output_csv_file, measIdx)
+                measIdx += 1
+            foundStart = False
             jsonstr = ""
         else:
-            if m:
+            if foundStart:
                 jsonstr += line
-            #else:
-                #print("bogus at line %d = %s",i,line)
 
-def process(js,csvwriter):
-    global db
-    #print(js)
+    # print on stderr the stats when the stdin is terminated:
+    for statName in stats:
+        print(f"{statName}: {stats[statName]}", file=sys.stderr)
+
+
+def process(jsonStr, outFileName, measIndex):
+    global stats
+
+    # parse the JSON
     try:
-        obj = json.loads(js)
-    except:
-        eprint("bad json")
-        pass
-        return False 
-    try:
-        # caveat: assumes multiple streams are all from same IP so we take the 1st one
-        # todo: handle errors and missing elements
-        ip = (obj["start"]["connected"][0]["remote_host"]).encode('ascii', 'ignore')
-        local_port = obj["start"]["connected"][0]["local_port"]
-        remote_port = obj["start"]["connected"][0]["remote_port"]
-
-        sent = obj["end"]["sum_sent"]["bytes"]
-        rcvd = obj["end"]["sum_received"]["bytes"]
-        sent_speed = obj["end"]["sum_sent"]["bits_per_second"] / 1000 / 1000
-        rcvd_speed = obj["end"]["sum_received"]["bits_per_second"] / 1000 / 1000
-        
-
-        reverse = obj["start"]["test_start"]["reverse"]
-        time = (obj["start"]["timestamp"]["time"]).encode('ascii', 'ignore')
-        cookie = (obj["start"]["cookie"]).encode('ascii', 'ignore')
-        protocol = (obj["start"]["test_start"]["protocol"]).encode('ascii', 'ignore')
-        duration = obj["start"]["test_start"]["duration"]
-        num_streams = obj["start"]["test_start"]["num_streams"]
-        if reverse not in [0, 1]:
-            sys.exit("unknown reverse")
-
-        s = 0
-        r = 0
-        if ip in db:
-            (s, r) = db[ip]
-
-        if reverse == 0:
-            r += rcvd
-            sent = 0
-            sent_speed = 0
-        else:
-            s += sent
-            rcvd = 0
-            rcvd_speed = 0
-
-        db[ip] = (s, r)
-
-        csvwriter.writerow([time, ip, local_port, remote_port, duration, protocol, num_streams, cookie, sent, sent_speed, rcvd, rcvd_speed, s, r])
-        return True
+        obj = json.loads(jsonStr)
     except Exception as ex:
-       eprint("error or bogus test: " + str(ex))
-       pass
-       return False
+        eprint(f"Failed to parse the JSON of an iperf3 measurement: {ex}")
+        stats["JsonParseFailures"] += 1
+        return False
 
-def dumpdb(database):
-    """ dump db to text """
-    for i in database:
-        (s, r) = database[i]
-        print("%s, %d , %d " % (i, s, r))
+    # if we get here, parsing was successful.. but iperf3 might have signalled an error:
+    stats["NumMeasurements"] += 1
+    if "error" in obj:
+        eprint(f"Found an iperf3 measurement reporting an error: " + obj["error"])
+        stats["MeasurementsWithErrors"] += 1
+        return False
 
-if __name__ == '__main__':
-    main()
+    ip = ""
+    localPort = 0
+    remotePort = 0
+    epochTestStart = 0
+    durationSec = 0
+    bytesRx = 0
+    bytesTx = 0
+
+    # extract info from the "start" object
+    try:
+        ip = obj["start"]["connected"][0]["remote_host"]
+        localPort = obj["start"]["connected"][0]["local_port"]
+        remotePort = obj["start"]["connected"][0]["remote_port"]
+        epochTestStart = obj["start"]["timestamp"][
+            "timesecs"
+        ]  # this is a Unix epoch actually
+    except Exception as ex:
+        eprint(
+            f"Failed to parse the JSON of an iperf3 measurement: some key related to 'start' object was not found: {ex}"
+        )
+        stats["JsonParseFailures"] += 1
+        return False
+
+    # extract info from the "end" object
+    try:
+        durationSec = obj["end"]["sum_received"]["seconds"]
+        bytesRx = obj["end"]["sum_received"]["bytes"]
+        bytesTx = obj["end"]["sum_sent"]["bytes"]
+    except Exception as ex:
+        eprint(
+            f"Failed to parse the JSON of an iperf3 measurement: some key related to 'end' object was not found: {ex}"
+        )
+        stats["JsonParseFailures"] += 1
+        return False
+
+    # IMPORTANT: the bandwidth is measured in bytes-per-second (Bps) and not bit-per-second (bps)
+    bandwidthRx = round(bytesRx / durationSec)
+    bandwidthTx = round(bytesTx / durationSec)
+
+    # the reason why in each line both the Unix epoch and the human-friendly date/time is reported is to make it easier to
+    # process this data in tools that do not support Unix epoch out of the box (like Excel or OpenOffice Calc)
+    humanFriendlyTestStartTimestamp = datetime.datetime.fromtimestamp(epochTestStart)
+    csv_row = [
+        humanFriendlyTestStartTimestamp,
+        epochTestStart,
+        ip,
+        localPort,
+        remotePort,
+        durationSec,
+        bytesRx,
+        bytesTx,
+        bandwidthRx,
+        bandwidthTx,
+    ]
+
+    # finally produce the CSV line:
+    if not outFileName:
+        csvwriter = csv.writer(sys.stdout)
+        if measIndex == 0:
+            csvwriter.writerow(csv_header)
+        csvwriter.writerow(csv_row)
+    else:
+        # only print the header line if the CSV file does not exist yet... otherwise we assume the header was already provided
+        # anyway printing the header in the middle of an initiated CSV file is not a Good Idea
+        printHeaderLine = not os.path.isfile(outFileName)
+        with open(outFileName, "a", encoding="UTF8", newline="") as f:
+            csvwriter = csv.writer(f)
+            if printHeaderLine:
+                csvwriter.writerow(csv_header)
+            csvwriter.writerow(csv_row)
+
+    stats["CsvLinesWritten"] += 1
+
+    return True
+
+
+if __name__ == "__main__":
+    args = parse_cmdline()
+    main(args.output_csv)
